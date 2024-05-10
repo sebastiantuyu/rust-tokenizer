@@ -1,143 +1,142 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, vec};
 
 use regex::Regex;
 
-type ItemMatch = HashMap<usize, HashMap<usize, Incidence>>;
-
 #[derive(Debug)]
 pub struct Incidence {
-  // merged_from: String,
   incidences: usize,
   id: u16,
 }
 
+type ItemMatchV2 = HashMap<(usize, usize), Incidence>;
+
 pub struct Parser {
   global: usize,
-  pub merges: HashMap<usize, String>
+  pub merges: ItemMatchV2,
+  pub inverse_merges: HashMap<usize, (usize, usize)>
 }
 
 impl Parser {
   pub fn new() -> Self {
     Parser {
-      global: 0,
-      merges: HashMap::new()
+      global: 1,
+      merges: HashMap::new(),
+      inverse_merges: HashMap::new()
     }
   }
 
-  pub fn get_merges(&mut self) -> HashMap<usize, String> {
-    let filtered_merges: HashMap<usize, String> = HashMap::new();
-    for (merge_key, merge_value) in self.merges.iter() {
-
+  pub fn save_merge(&mut self, key: &(usize, usize), value: &mut usize) {
+    match self.merges.get_mut(key) {
+      Some(global_result) => {
+        global_result.incidences = *value;
+      }
+      None => {
+        let id = 255 + self.global as u16;
+        self.merges.insert(*key, Incidence {
+          id,
+          incidences: *value // this actually should be 1
+        });
+        self.inverse_merges.insert(id as usize, *key);
+        self.global += 1;
+      }
     }
-    filtered_merges
   }
 
-  pub fn check_merges(&mut self, t: &usize) -> String {
-    if *t >= 255 {
-      return self.merges.get(t).unwrap().to_string();
-    }
-    return String::from_utf8(vec![*t as u8]).unwrap();
-  }
-
-  pub fn parse(&mut self, target: &Vec<usize>) -> ItemMatch {
-    let mut dict: ItemMatch = HashMap::new();
+  pub fn parse(&mut self, target: &Vec<usize>) -> &ItemMatchV2 {
+    let mut dict: HashMap<(usize, usize), usize> = HashMap::new();
     let mut target_bytes = target.iter().peekable();
     while let Some(current_byte) = target_bytes.next() {
-      match dict.get_mut(current_byte) {
-        Some(value) => {
-          if let Some(next_byte) = target_bytes.peek() {
-            if let Some(exists) = value.get_mut(*next_byte) {
-              exists.incidences += 1;
-            }
+      if let Some(next_byte) = target_bytes.peek() {
+        match dict.get_mut(&(*current_byte, **next_byte)) {
+          Some(result) => {
+            *result += 1;
+            self.save_merge(&(*current_byte, **next_byte), result);
+            break;
           }
-        }
-        _ => {
-          if let Some(next_byte) = target_bytes.peek() {
-            let mut target: HashMap<usize, Incidence> = HashMap::new();
-            let id =  255 + self.global;
-            if *current_byte >= 255 || **next_byte >= 255 {
-              let current_result = self.check_merges(current_byte);
-              let next_result = self.check_merges(next_byte);
-              self.merges.insert(id, current_result + next_result.as_str());
-            } else {
-              match String::from_utf8(vec![*current_byte as u8, **next_byte as u8]) {
-                Ok(result) => {
-                  self.merges.insert(id, result);
-                }
-                Err(err) => {
-                  eprintln!("{}", err);
-                }
-              }
-
-            }
-            let i = Incidence {
-              incidences: 1,
-              id: id as u16,
-            };
-            self.global += 1;
-            target.insert(**next_byte as usize, i);
-            dict.insert(*current_byte, target);
+          None => {
+            dict.insert((*current_byte, **next_byte), 1);
           }
         }
       }
     }
-    dict
+    &self.merges
   }
 
-  pub fn replace(&mut self, target: &Vec<usize>, matched: &ItemMatch) -> Vec<usize> {
+  pub fn replace(&mut self, target: &Vec<usize>) -> Vec<usize> {
     let mut target_as_bytes = target.iter().peekable();
-    let mut replaced: Vec<usize> = Vec::new();
+    let mut result: Vec<usize> = Vec::new();
     while let Some(current_byte) = target_as_bytes.next() {
-      if let Some(next_concat) = matched.get(current_byte)
-      {
-        if let Some(next_current_byte) = target_as_bytes.peek() {
-          if let Some(next_next_concat) = next_concat.get(next_current_byte) {
-            if next_next_concat.incidences > 1 {
-              dbg!(&next_next_concat);
-              replaced.push(next_next_concat.id as usize);
-              target_as_bytes.next();
-            } else {
-              replaced.push(*current_byte as usize);
-            }
-          } else {
-            replaced.push(*current_byte as usize);
+      if let Some(next_byte) = target_as_bytes.peek() {
+        match self.merges.get(&(*current_byte, **next_byte)) {
+          Some(global_result) => { // by definition only 2 >= are here
+            result.push(global_result.id as usize);
+            target_as_bytes.next();
           }
-        } else {
-          replaced.push(*current_byte as usize);
+          _ => {
+            // if is not electable for replacement
+            result.push(*current_byte);
+          }
         }
+      } else {
+        // if is the last char
+        result.push(*current_byte);
       }
     }
+    result
+  }
+}
 
-    replaced
+pub fn decode(target: &str, vocab: Vec<String>) -> Vec<String> {
+  let regex_pattern = vocab
+    .iter()
+    .map(|s| regex::escape(&s))
+    .collect::<Vec<_>>()
+    .join("|");
+  let regex = Regex::new(&regex_pattern).unwrap();
+
+  let mut result = Vec::new();
+  let mut last_end = 0;
+
+  for capture in regex.captures_iter(target) {
+      let start = capture.get(0).unwrap().start();
+      let end = capture.get(0).unwrap().end();
+
+      if start > last_end {
+          result.push(target[last_end..start].to_string());
+      }
+
+      result.push(target[start..end].to_string());
+
+      last_end = end;
   }
 
+  if last_end < target.len() {
+      result.push(target[last_end..].to_string());
+  }
 
-  pub fn encode(&mut self, target: &str, vocab: Vec<String>) -> Vec<String> {
-    let vocab_regex: Vec<String> = vocab
-      .iter()
-      .map(|s| regex::escape(&s))
-      .collect();
-    let regex_pattern = vocab_regex.join("|");
-    let regex = Regex::new(&regex_pattern).unwrap();
-    dbg!(&regex);
+  result
+}
 
-    // let stack: Vec<&str> = regex.split(target).collect();
-    // let mut to_evaluate = target.chars().peekable();
-    // let mut stack: Vec<String> = Vec::new();
-    // let mut inner_stack: String = "".to_string();
+pub fn resolve_references(data: &HashMap<usize, (usize, usize)>, key: usize) -> Vec<u8> {
+  if let Some(&(first, second)) = data.get(&key) {
+      let mut resolved_values: Vec<u8> = vec![first as u8, second as u8];
 
+      if data.contains_key(&first) {
+          let first_resolved = resolve_references(data, first);
+          let last = resolved_values[1];
+          resolved_values[0] = first_resolved[0];
+          resolved_values[1] = first_resolved[1];
+          resolved_values.push(last);
+      }
 
-    // while let Some(c) = to_evaluate.next() {
-    //   if vocab.contains(&inner_stack.to_string()) {
-    //     stack.push(inner_stack.to_string());
-    //     inner_stack = "".to_string();
-    //   }
-    //   inner_stack = inner_stack + &c.to_string();
-    // }
+      if data.contains_key(&second) {
+          let second_resolved = resolve_references(data, second);
+          resolved_values.pop(); // Remove the original second value
+          resolved_values.extend_from_slice(&second_resolved); // Append resolved second values
+      }
 
-    regex
-      .split(target)
-      .map(|x| x.to_string())
-      .collect()
+      resolved_values
+  } else {
+      vec![]
   }
 }
